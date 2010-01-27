@@ -29,6 +29,7 @@ import Data.List (sort)
 import Data.Maybe
 
 import Data.Set as S hiding (map)
+import Data.Time.Clock
 import Data.Word
 
 import Network
@@ -42,7 +43,9 @@ import FSP hiding (pieceMap)
 import PieceMgrP
 import qualified Queue as Q
 import RateCalc as RC
+import StatusP
 import Supervisor
+import TimerP
 import Torrent
 import WireProtocol
 
@@ -62,9 +65,11 @@ unchokePeer ch = sync $ transmit ch UnchokePeer
 type ConnectRecord = (HostName, PortID, PeerId, InfoHash, PieceMap)
 
 connect :: ConnectRecord -> SupervisorChan -> PieceMgrChannel -> FSPChannel -> LogChannel
+	-> StatusChan
         -> MgrChannel -> Int
         -> IO ThreadId
-connect (host, port, pid, ih, pm) pool pieceMgrC fsC logC mgrC nPieces = spawn (connector >> return ())
+connect (host, port, pid, ih, pm) pool pieceMgrC fsC logC statC mgrC nPieces =
+    spawn (connector >> return ())
   where connector =
          do logMsg logC $ "Connecting to " ++ show host ++ " (" ++ showPort port ++ ")"
             h <- connectTo host port
@@ -78,7 +83,7 @@ connect (host, port, pid, ih, pm) pool pieceMgrC fsC logC mgrC nPieces = spawn (
               Right (_caps, _rpid) ->
                   do logMsg logC "entering peerP loop code"
 		     supC <- channel -- TODO: Should be linked later on
-		     children <- peerChildren logC h mgrC pieceMgrC fsC pm nPieces
+		     children <- peerChildren logC h mgrC pieceMgrC fsC statC pm nPieces
 		     sync $ transmit pool $ SpawnNew (Supervisor $ allForOne children)
 		     return ()
 
@@ -175,8 +180,8 @@ sendQueueP logC inC outC bandwC supC = spawnP (SQCF logC inC outC bandwC) (SQST 
 
 
 peerChildren :: LogChannel -> Handle -> MgrChannel -> PieceMgrChannel
-	     -> FSPChannel -> PieceMap -> Int -> IO Children
-peerChildren logC handle pMgrC pieceMgrC fsC pm nPieces = do
+	     -> FSPChannel -> StatusChan -> PieceMap -> Int -> IO Children
+peerChildren logC handle pMgrC pieceMgrC fsC statusC pm nPieces = do
     queueC <- channel
     senderC <- channel
     receiverC <- channel
@@ -184,7 +189,8 @@ peerChildren logC handle pMgrC pieceMgrC fsC pm nPieces = do
     return [Worker $ senderP logC handle senderC,
 	    Worker $ sendQueueP logC queueC senderC sendBWC,
 	    Worker $ receiverP logC handle receiverC,
-	    Worker $ peerP pMgrC pieceMgrC fsC pm logC nPieces handle queueC receiverC sendBWC]
+	    Worker $ peerP pMgrC pieceMgrC fsC pm logC nPieces handle
+				queueC receiverC sendBWC statusC]
 
 data RPCF = RPCF { rpLogC :: LogChannel
                  , rpMsgC :: Channel (Message, Integer) }
@@ -233,6 +239,8 @@ data PCF = PCF { inCh :: Channel (Message, Integer)
 	       , fsCh :: FSPChannel
 	       , peerCh :: PeerChannel
 	       , sendBWCh :: BandwidthChannel
+	       , timerCh :: Channel ()
+	       , statCh :: StatusChan
 	       , pieceMap :: PieceMap
 	       }
 
@@ -251,11 +259,14 @@ data PST = PST { weChoke :: Bool
 
 peerP :: MgrChannel -> PieceMgrChannel -> FSPChannel -> PieceMap -> LogChannel -> Int -> Handle
          -> Channel SendQueueMessage -> Channel (Message, Integer) -> BandwidthChannel
+	 -> StatusChan
 	 -> SupervisorChan -> IO ThreadId
-peerP pMgrC pieceMgrC fsC pm logC nPieces h outBound inBound sendBWC supC = do
+peerP pMgrC pieceMgrC fsC pm logC nPieces h outBound inBound sendBWC statC supC = do
     ch <- channel
-    spawnP (PCF inBound outBound pMgrC pieceMgrC logC fsC ch sendBWC pm)
-	   (PST True False S.empty True False [] (RC.new 0) (RC.new 0))
+    tch <- channel
+    ct <- getCurrentTime
+    spawnP (PCF inBound outBound pMgrC pieceMgrC logC fsC ch sendBWC tch statC pm)
+	   (PST True False S.empty True False [] (RC.new ct) (RC.new ct))
 	   (cleanupP startup (defaultStopHandler supC) cleanup)
   where startup = do
 	    tid <- liftIO $ myThreadId
@@ -263,6 +274,9 @@ peerP pMgrC pieceMgrC fsC pm logC nPieces h outBound inBound sendBWC supC = do
 	    asks peerCh >>= (\ch -> sendPC peerMgrCh $ Connect tid ch) >>= syncP
 	    pieces <- getPiecesDone
 	    syncP =<< (sendPC outCh $ SendQMsg $ BitField (constructBitField nPieces pieces))
+	    -- Install the StatusP timer
+	    c <- asks timerCh
+	    liftIO $ TimerP.register 30 () c
 	    foreverP (recvEvt >> fillBlocks)
 	cleanup = do
 	    t <- liftIO myThreadId
@@ -272,26 +286,52 @@ peerP pMgrC pieceMgrC fsC pm logC nPieces h outBound inBound sendBWC supC = do
 	    syncP =<< (sendPC pieceMgrCh $ GetDone c)
 	    recvP c (const True) >>= syncP
 	recvEvt = do
-	    syncP =<< chooseP [peerMsgEvent, chokeMgrEvent, upRateEvent]
+	    syncP =<< chooseP [peerMsgEvent, chokeMgrEvent, upRateEvent, timerEvent]
 	chokeMgrEvent = do
 	    evt <- recvPC peerCh
-	    wrapP evt (\msg ->
+	    wrapP evt (\msg -> do
+		log "ChokeMgrEvent"
 		case msg of
 		    PieceCompleted pn -> do
+			log "PieceCompleted"
 			syncP =<< (sendPC outCh $ SendQMsg $ Have pn)
 		    ChokePeer -> do syncP =<< sendPC outCh SendOChoke
+				    log "ChokePeer"
 				    modify (\s -> s {weChoke = True})
 		    UnchokePeer -> do syncP =<< (sendPC outCh $ SendQMsg Unchoke)
+				      log "UnchokePeer"
 				      modify (\s -> s {weChoke = False})
-		    PeerStats retCh -> do i <- gets peerInterested
-					  syncP =<< sendP retCh (0.0, i)) -- TODO: Fix
+		    PeerStats t retCh -> do
+			i <- gets peerInterested
+			ur <- gets upRate
+			dr <- gets downRate
+			let (up, nur) = RC.extractRate t ur
+			    (down, ndr) = RC.extractRate t dr
+			log $ "Peer has rates up/down: " ++ show up ++ "/" ++ show down
+			sendP retCh (up, down, i) >>= syncP
+			modify (\s -> s { upRate = nur , downRate = ndr }))
+	timerEvent = do
+	    evt <- recvPC timerCh
+	    wrapP evt (\() -> do
+		log "TimerEvent"
+	        tch <- asks timerCh
+		liftIO $ TimerP.register 30 () tch
+		ur <- gets upRate
+		dr <- gets downRate
+		let (upCnt, nuRate) = RC.extractCount $ ur
+		    (downCnt, ndRate) = RC.extractCount $ dr
+		(sendPC statCh $ PeerStat { peerUploaded = upCnt
+					  , peerDownloaded = downCnt }) >>= syncP
+		modify (\s -> s { upRate = nuRate, downRate = ndRate }))
 	upRateEvent = do
 	    evt <- recvPC sendBWCh
-	    wrapP evt (\uploaded ->
+	    wrapP evt (\uploaded -> do
+	        log "upRateEvent"
 		modify (\s -> s { upRate = RC.update uploaded $ upRate s}))
 	peerMsgEvent = do
 	    evt <- recvPC inCh
 	    wrapP evt (\(msg, sz) -> do
+		log "PeerMsgEvent"
 		modify (\s -> s { downRate = RC.update sz $ downRate s})
 		case msg of
 		  KeepAlive  -> return ()
