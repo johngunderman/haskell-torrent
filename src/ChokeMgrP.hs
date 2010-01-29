@@ -43,7 +43,7 @@ import TimerP
 
 data ChokeMgrMsg = Tick
 		 | RemovePeer PeerPid
-		 | AddPeer PeerPid PeerChannel Bool
+		 | AddPeer PeerPid PeerChannel
 type ChokeMgrChannel = Channel ChokeMgrMsg
 
 data CF = CF { logCh :: LogChannel
@@ -59,24 +59,32 @@ type ChokeMgrProcess a = Process CF PeerDB a
 -- INTERFACE
 ----------------------------------------------------------------------
 
-start :: LogChannel -> ChokeMgrChannel -> ChokeInfoChannel -> Int -> SupervisorChan -> IO ThreadId
-start logC ch infoC ur supC = do
+start :: LogChannel -> ChokeMgrChannel -> ChokeInfoChannel -> Int -> Bool -> SupervisorChan -> IO ThreadId
+start logC ch infoC ur weSeed supC = do
     TimerP.register 10 Tick ch
     spawnP (CF logC ch infoC) (initPeerDB $ calcUploadSlots ur Nothing)
 	    (catchP (forever pgm)
 	      (defaultStopHandler supC))
   where
-    initPeerDB slots = PeerDB 2 slots M.empty []
+    initPeerDB slots = PeerDB 2 weSeed slots M.empty []
     pgm = do chooseP [mgrEvent, infoEvent] >>= syncP
     mgrEvent = do
 	  ev <- recvPC mgrCh
 	  wrapP ev (\msg -> case msg of
 			Tick                 -> tick
 			RemovePeer t         -> removePeer t
-			AddPeer t pCh weSeed -> addPeer' pCh weSeed t)
+			AddPeer t pCh -> do
+			    weSeed <- gets seeding
+			    addPeer' pCh weSeed t)
     infoEvent = do
 	  ev <- recvPC infoCh
-	  wrapP ev (\(PieceDone pn) -> informDone pn)
+	  wrapP ev (\m -> case m of
+			    PieceDone pn -> informDone pn
+			    TorrentComplete -> do
+				modify (\s -> s { seeding = True
+						, peerMap =
+						   M.map (\pi -> pi { pAreSeeding = True })
+						         $ peerMap s}))
     tick = do log "Ticked"
 	      ch <- asks mgrCh
 	      liftIO $ TimerP.register 10 Tick ch
@@ -84,8 +92,8 @@ start logC ch infoC ur supC = do
 	      runRechokeRound
     removePeer tid = modify (\db -> db { peerMap = M.delete tid (peerMap db) })
 
-addPeer :: ChokeMgrChannel -> PeerPid -> PeerChannel -> Bool -> IO ()
-addPeer ch pid pch = sync . transmit ch . (AddPeer pid pch)
+addPeer :: ChokeMgrChannel -> PeerPid -> PeerChannel -> IO ()
+addPeer ch pid = sync . transmit ch . (AddPeer pid)
 
 removePeer :: ChokeMgrChannel -> PeerPid -> IO ()
 removePeer ch pid = sync $ transmit ch $ RemovePeer pid
@@ -101,6 +109,7 @@ type PeerPid = ThreadId -- For now, should probably change
 --   far we are in the process of wandering the optimistic unchoke chain.
 data PeerDB = PeerDB
     { chokeRound :: Int       -- ^ Counted down by one from 2. If 0 then we should advance the peer chain.
+    , seeding :: Bool         -- ^ True if we are seeding the torrent. In a multi-torrent world, this has to change.
     , uploadSlots :: Int      -- ^ Current number of upload slots
     , peerMap :: PeerMap      -- ^ Map of peers
     , peerChain ::  [PeerPid] -- ^ The order in which peers are optimistically unchoked
@@ -122,9 +131,24 @@ type PeerMap = M.Map PeerPid PeerInfo
 -- | Auxilliary data structure. Used in the rechoking process.
 type RechokeData = (PeerPid, PeerInfo)
 
--- | Peers are sorted by their current download rate. We want to keep fast peers around.
-sortPeers :: [RechokeData] -> [RechokeData]
-sortPeers = sortBy (comparing $ pDownRate . snd)
+compareInv :: Ord a => a -> a -> Ordering
+compareInv x y =
+    case compare x y of
+	LT -> GT
+	EQ -> EQ
+	GT -> LT
+
+comparingWith :: Ord a => (a -> a -> Ordering) -> (b -> a) -> b -> b -> Ordering
+comparingWith comp project x y =
+    comp (project x) (project y)
+
+-- | Leechers are sorted by their current download rate. We want to keep fast peers around.
+sortLeech :: [RechokeData] -> [RechokeData]
+sortLeech = sortBy (comparingWith compareInv $ pDownRate . snd)
+
+-- | Seeders are sorted by their current upload rate.
+sortSeeds :: [RechokeData] -> [RechokeData]
+sortSeeds = sortBy (comparingWith compareInv $ pUpRate . snd)
 
 -- | Advance the peer chain to the next peer eligible for optimistic
 --   unchoking. That is, skip peers which are not interested in our pieces
@@ -215,9 +239,8 @@ assignUploadSlots slots downloaderPeers seederPeers =
           0 -> (dSlots, sSlots)
           k -> (min (dSlots + k) (length dPeers), sSlots - k)
 
--- | @selectPeers upRate d s@ selects peers from a list of downloader peers @d@ and a list of seeder
---   peers @s@. The value of @upRate@ defines the upload rate for the client and is used in determining
---   the rate of the slots.
+-- | @selectPeers upSlots d s@ selects peers from a list of downloader peers @d@ and a list of seeder
+--   peers @s@. The value of @upSlots@ defines the number of upload slots available
 selectPeers :: Int -> [RechokeData] -> [RechokeData] -> S.Set PeerPid
 selectPeers uploadSlots downPeers seedPeers = S.union downPids seedPids
     where
@@ -225,8 +248,8 @@ selectPeers uploadSlots downPeers seedPeers = S.union downPids seedPids
                                  uploadSlots
                                  downPeers
                                  seedPeers
-      downPids = S.fromList $ map fst $ take nDownSlots downPeers
-      seedPids = S.fromList $ map fst $ take nSeedSlots seedPeers
+      downPids = S.fromList $ map fst $ take nDownSlots $ sortLeech downPeers
+      seedPids = S.fromList $ map fst $ take nSeedSlots $ sortSeeds seedPeers
 
 -- | This function carries out the choking and unchoking of peers in a round.
 performChokingUnchoking :: S.Set PeerPid -> [RechokeData] -> IO ()

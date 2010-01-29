@@ -53,14 +53,16 @@ wish-list.
    - Update the Seeder status in PeerMgrP.
    - When stopping a Peer, put back the Pieces to the Piece Manager.
    - Do not send HAVE messages if the Peer already has the Piece Number.
+   - Rewrite the tracker code to use the new monad transformer stack.
+
+Known Bugs
+----------
+
+None at the moment.
 
 Before releasing into the "wild"
 --------------------------------
 
-   - Use the pUpRate for something in the choke manager.
-   - The client needs to correctly tell the tracker how many bytes there
-     are left and whether we seed or leech. Currently, the values are
-     hardcoded into the client.
    - The client needs to handle multi-file torrents. It is not as hard as
      it may sound — the only part of the system that needs to know about
      files is the code handling the file system. All other parts can just
@@ -68,12 +70,15 @@ Before releasing into the "wild"
    - We currently take space proportional to torrent size due to our SHA1
      calculation being slow and not use a file descriptor. Research into a
      faster SHA1 library would be really beneficial.
-   - Correctly change to seeder mode when we have completed the torrent.
 
 Items for later (no particular order)
 -------------------------------------
 
    - Add support for multiple torrents at once
+   - The client needs to handle multi-file torrents. It is not as hard as
+     it may sound — the only part of the system that needs to know about
+     files is the code handling the file system. All other parts can just
+     keep on transferring pieces.
    - Add prioritization support of multiTorrents
    - Implement a scraper on trackers
    - Implement extensions from http://www.bittorrent.org/beps/bep_0000.html
