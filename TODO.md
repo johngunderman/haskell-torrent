@@ -54,11 +54,17 @@ wish-list.
    - When stopping a Peer, put back the Pieces to the Piece Manager.
    - Do not send HAVE messages if the Peer already has the Piece Number.
    - Rewrite the tracker code to use the new monad transformer stack.
+   - Improve on the command line parser. We will certainly need full-fledged
+     CL parsing at some point.
+   - Make the client ignore log messages beneath a certain log level
+   - Make the client be able to select what processes that are allowed to
+     log what (perhaps write a DSL for it).
+   - When closing, gracefully tell the tracker about it.
 
 Known Bugs
 ----------
 
-None at the moment.
+None known at the moment.
 
 Before releasing into the "wild"
 --------------------------------

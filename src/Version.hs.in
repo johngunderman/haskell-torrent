@@ -1,0 +1,8 @@
+-- | Haskell-torrent version
+module Version (version) where
+
+githead :: String
+githead = "@GITHEAD@"
+
+version :: String
+version = githead

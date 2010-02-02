@@ -1,11 +1,9 @@
 module ChokeMgrP (
     -- * Types, Channels
       ChokeMgrChannel
+    , ChokeMgrMsg(..)
     -- * Interface
     , start
-    -- * Helper functions
-    , removePeer
-    , addPeer
     )
 where
 
@@ -33,7 +31,7 @@ import PeerTypes
 import PieceMgrP hiding (start)
 import Process
 import Logging
-import FSP hiding (start, State)
+import FSP hiding (start)
 import Supervisor
 import Torrent hiding (infoHash)
 import TimerP
@@ -52,7 +50,7 @@ data CF = CF { logCh :: LogChannel
 	     }
 
 instance Logging CF where
-  getLogger = logCh
+  getLogger cf = ("ChokeMgrP", logCh cf)
 
 type ChokeMgrProcess a = Process CF PeerDB a
 
@@ -74,6 +72,7 @@ start logC ch infoC ur weSeed supC = do
 			Tick                 -> tick
 			RemovePeer t         -> removePeer t
 			AddPeer t pCh -> do
+			    logDebug $ "Adding peer " ++ show t
 			    weSeed <- gets seeding
 			    addPeer' pCh weSeed t)
     infoEvent = do
@@ -85,18 +84,13 @@ start logC ch infoC ur weSeed supC = do
 						, peerMap =
 						   M.map (\pi -> pi { pAreSeeding = True })
 						         $ peerMap s}))
-    tick = do log "Ticked"
+    tick = do logDebug "Ticked"
 	      ch <- asks mgrCh
-	      liftIO $ TimerP.register 10 Tick ch
+	      TimerP.register 10 Tick ch
 	      updateDB
 	      runRechokeRound
-    removePeer tid = modify (\db -> db { peerMap = M.delete tid (peerMap db) })
-
-addPeer :: ChokeMgrChannel -> PeerPid -> PeerChannel -> IO ()
-addPeer ch pid = sync . transmit ch . (AddPeer pid)
-
-removePeer :: ChokeMgrChannel -> PeerPid -> IO ()
-removePeer ch pid = sync $ transmit ch $ RemovePeer pid
+    removePeer tid = do logDebug $ "Removing peer " ++ show tid
+			modify (\db -> db { peerMap = M.delete tid (peerMap db) })
 
 -- INTERNAL FUNCTIONS
 ----------------------------------------------------------------------

@@ -1,40 +1,42 @@
 -- | Logging primitives
+{-# LANGUAGE TypeSynonymInstances #-}
 module Logging (
+  -- * Classes
+    Logging(..)
   -- * Types
-    LogChannel
+  , LogChannel
   , LogPriority(..)
-  -- * Interface
+  -- * Spawning
+  , startLogger
+  -- * Interface (deprecated)
   , logMsg
   , logMsg'
-  , logFatal
   )
 where
 
+import Control.Concurrent
 import Control.Concurrent.CML
+import Control.Monad.Reader
 
-data LogPriority = Low
-                 | Default
-                 | System
-                 | High
-                 | Fatal
-                 deriving Show
+import Data.Monoid
 
--- TODO: Consider generalizing this to any member of Show
-data LogMsg = Mes LogPriority String
+import LoggingTypes
+import Prelude hiding (log)
 
-instance Show LogMsg where
-    show (Mes pri str) = show pri ++ ":\t" ++ str
+import Process
 
-type LogChannel = Channel LogMsg
+startLogger :: LogChannel -> IO ThreadId
+startLogger logC =
+    spawnP logC () (forever lp)
+  where
+    lp = do m <- syncP =<< logEv
+            liftIO $ print m
+    logEv = recvP logC (const True)
 
 -- | Log a message to a channel
 logMsg :: LogChannel -> String -> IO ()
-logMsg c = sync . transmit c . Mes Default
-
--- | Log a fatal message on a channel, TODO: use logMsg' for this
-logFatal :: LogChannel -> String -> IO ()
-logFatal c = sync . transmit c . Mes Fatal
+logMsg c m = logMsg' c "Unknown" Info m
 
 -- | Log a message to a channel with a priority
-logMsg' :: LogChannel -> LogPriority -> String -> IO ()
-logMsg' c pri = sync . transmit c . Mes pri
+logMsg' :: LogChannel -> String -> LogPriority -> String -> IO ()
+logMsg' c name pri = sync . transmit c . Mes pri name

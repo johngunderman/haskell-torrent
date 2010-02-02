@@ -1,6 +1,8 @@
 name: HaskellTorrent
 version: 0.0
-cabal-version: >= 1.2
+category: Network
+description: A bittorrent client
+cabal-version: >= 1.6
 
 license: BSD3
 license-file: LICENSE
@@ -10,10 +12,17 @@ maintainer: jesper.louis.andersen@gmail.com
 stability: experimental
 synopsis: A Haskell Bittorrent client
 build-type: Simple
+extra-tmp-files: src/Version.hs
+
+flag debug
+  description: Enable debug support
+  default:     False
 
 executable HaskellTorrent
   hs-source-dirs: src
   main-is: Main.hs
+  extensions: CPP
+
   build-depends:
     base >= 3.0,
     base <= 5.0,
@@ -29,6 +38,11 @@ executable HaskellTorrent
     cml,
     HTTP,
     time
+
+  if flag(debug)
+      cpp-options: "-DDEBUG"
+  else
+      cpp-options: "-NDEBUG"
 
 source-repository head
   type: git

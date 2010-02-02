@@ -21,18 +21,21 @@ import qualified PeerMgrP
 import qualified PieceMgrP (start, createPieceDb)
 import qualified Process ()
 import qualified ChokeMgrP (start)
+import Logging
 import qualified StatusP
 import Supervisor
 import qualified TimerP()
 import Torrent
 import qualified TrackerP
+import Version
 
 main :: IO ()
 main = getArgs >>= run
 
 
 run :: [String] -> IO ()
-run args =
+run args = do
+    putStrLn $ "This is Haskell-torrent version " ++ version
     case args of
         []       -> putStrLn "*** Usage: haskellTorrent <file.torrent>"
         (name:_) -> download name
@@ -44,14 +47,16 @@ download name = do
     case bcoded of
       Left pe -> print pe
       Right bc ->
-        do (h, haveMap, pieceMap) <- openAndCheckFile bc
+        do print bc
+	   (h, haveMap, pieceMap) <- openAndCheckFile bc
+	   logC <- channel
+	   Logging.startLogger logC
            -- setup channels
            trackerC <- channel
            statusC  <- channel
            waitC    <- channel
            pieceMgrC <- channel
 	   supC <- channel
-	   logC <- channel
 	   fspC <- channel
            statInC <- channel
            pmC <- channel
@@ -65,7 +70,8 @@ download name = do
 	       left = bytesLeft haveMap pieceMap
 	       clientState = determineState haveMap
 	   -- Create main supervisor process
-	   allForOne [ Worker $ ConsoleP.start logC waitC
+	   allForOne "MainSup"
+		     [ Worker $ ConsoleP.start logC waitC
 		     , Worker $ FSP.start h logC pieceMap fspC
 		     , Worker $ PeerMgrP.start pmC pid (infoHash ti)
 				    pieceMap pieceMgrC fspC logC chokeC statInC (pieceCount ti)
@@ -74,10 +80,10 @@ download name = do
 		     , Worker $ StatusP.start logC left clientState statusC statInC
 		     , Worker $ TrackerP.start ti pid defaultPort logC statusC statInC
 					trackerC pmC
-		     , Worker $ ChokeMgrP.start logC chokeC chokeInfoC 100 -- 100 is upload rate in Kilobytes
+		     , Worker $ ChokeMgrP.start logC chokeC chokeInfoC 100 -- 100 is upload rate in KB
 				    (case clientState of
 					Seeding -> True
 					Leeching -> False)
-		     ] supC
+		     ] logC supC
            sync $ receive waitC (const True)
            return ()
