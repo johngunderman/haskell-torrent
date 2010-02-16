@@ -1,4 +1,6 @@
 name: HaskellTorrent
+description: A Haskell Bittorrent client
+category: Network
 version: 0.0
 category: Network
 description: A bittorrent client
@@ -11,7 +13,7 @@ author: Jesper Louis Andersen
 maintainer: jesper.louis.andersen@gmail.com
 stability: experimental
 synopsis: A Haskell Bittorrent client
-build-type: Simple
+build-type: Configure
 extra-tmp-files: src/Version.hs
 
 flag debug
@@ -32,17 +34,20 @@ executable HaskellTorrent
     parsec,
     containers,
     bytestring,
-    SHA,
     random,
     network,
     cml,
     HTTP,
-    time
+    HsOpenSSL,
+    time,
+    random-shuffle,
+    directory
 
+  ghc-options: -threaded
   if flag(debug)
       cpp-options: "-DDEBUG"
   else
-      cpp-options: "-NDEBUG"
+      cpp-options: "-DNDEBUG"
 
 source-repository head
   type: git

@@ -23,19 +23,17 @@ wish-list.
    - Do not connect to ourselves :)
    - Write an installation and compilation guide.
    - Write a small introduction to git bisect we can point people towards.
-   - Add support for multiple files
    - (thomaschrstnsn) Implement a creator for torrent files
-   - (axman) Turn the logging system into a better framework, add log levels,
-     add process names so we can see who is doing what.
    - If we get a wrong URI, the code currently deadlocks since the tracker
      dies. Handle this problem gracefully.
    - (axman) Cleanup the BCode module, while keeping the interface somewhat
      stable. The code is an utter mess as it stands right now.
-   - (axman) Improve the cabal file for the project, check with GHC 6.12.1,
-     provide correct versions of needed packages.
    - When we grab pieces from the Piece Manager, let it provide us with a
      pruned set of pieces we can ask with later. This way, we only need to
      consider pieces we already have once and we get a faster system.
+
+     When doing this, only prune pieces which are done and checked.
+
    - The StatusP process is always fed static data. Feed it the correct data
      based on the current status: Are we a leecher or a seeder? And how much
      data is there left to download before we have the full file?
@@ -53,13 +51,22 @@ wish-list.
    - Update the Seeder status in PeerMgrP.
    - When stopping a Peer, put back the Pieces to the Piece Manager.
    - Do not send HAVE messages if the Peer already has the Piece Number.
-   - Rewrite the tracker code to use the new monad transformer stack.
    - Improve on the command line parser. We will certainly need full-fledged
      CL parsing at some point.
-   - Make the client ignore log messages beneath a certain log level
-   - Make the client be able to select what processes that are allowed to
-     log what (perhaps write a DSL for it).
    - When closing, gracefully tell the tracker about it.
+   - Let Piece Sets be S.Set PieceNum rather than [PieceNum]. They are
+     larger than 1000 for some large torrents, so it makes sense to shift to
+     a better representation.
+   - Cleanup the code around ChokeMgrP.advancePeerChain. It currently does a
+     lot of stuff it doesn't have to do.
+   - The status reporting code needs some help. It only transfers up/down
+     rates once every 30 seconds. If a peer is living for less than 30
+     seconds, then no upload/download will be reported for that peer. The
+     fix is to contact the StatusP when a peer closes if it has something to
+     transfer.
+   - Make sure we actually seed when the torrent finishes.
+     Rather hard to check with the current construction in the PeerMgr. The
+     PeerMgr needs more work before this is possible.
 
 Known Bugs
 ----------
@@ -69,22 +76,24 @@ None known at the moment.
 Before releasing into the "wild"
 --------------------------------
 
-   - The client needs to handle multi-file torrents. It is not as hard as
-     it may sound — the only part of the system that needs to know about
-     files is the code handling the file system. All other parts can just
-     keep on transferring pieces.
    - We currently take space proportional to torrent size due to our SHA1
      calculation being slow and not use a file descriptor. Research into a
      faster SHA1 library would be really beneficial.
+   - Check that the tracker is told about what happened.
+   - Introduce status update messages to the tracker. When the torrent is
+     started, stopped or completes, we should message the tracker with the
+     update right away. The tracker code already supports this, but the rest
+     of the code must do the right thing.
+   - What about reentrancy and FFI OpenSSL calls?
+   - Handle the following bug:
+            "The 'impossible' happened, are you implementing endgame?"
+     in PieceMgrP. We basically want to figure out what should happen.
 
 Items for later (no particular order)
 -------------------------------------
 
+   - Improve parallel execution. We are currently extremely synchronous.
    - Add support for multiple torrents at once
-   - The client needs to handle multi-file torrents. It is not as hard as
-     it may sound — the only part of the system that needs to know about
-     files is the code handling the file system. All other parts can just
-     keep on transferring pieces.
    - Add prioritization support of multiTorrents
    - Implement a scraper on trackers
    - Implement extensions from http://www.bittorrent.org/beps/bep_0000.html
@@ -95,7 +104,6 @@ Items for later (no particular order)
    - Support UDP tracking extension
    - Support partial downloads (select files you want in the torrent)
    - Write an ETA estimator
-   - Handle Endgame. Endgame is nasty but necessary.
    - Write the Users Guide.
    - Design, build and improve a graphic UI.
    - Design, build and improve a protocol for communicating with the client.
@@ -105,8 +113,5 @@ Items for later (no particular order)
    - We need to accept incoming connections. The system only connects
      outward at the moment
    - Write a fuzzing framework for bittorrent.
-   - Consider David Himmelstrups work in the packages bencode, torrent
-     In the long run it would be beneficial. Short term, there is less need
-     for the integration.
 
 # vim: filetype=none tw=76 expandtab

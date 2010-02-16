@@ -45,6 +45,7 @@ module BCode
               infoPieceLength,
               infoPieces,
               numberPieces,
+              infoFiles,
               prettyPrint,
 
               trackerComplete,
@@ -66,7 +67,6 @@ import qualified Data.ByteString as B
 import Data.Char
 import Data.Word
 import Data.Int
-import Data.Digest.Pure.SHA
 import Data.List
 import Data.Maybe
 import qualified Data.Map as M
@@ -76,6 +76,7 @@ import Data.Serialize
 import Data.Serialize.Put
 import Data.Serialize.Get
 
+import Digest
 
 -- | BCode represents the structure of a bencoded file
 data BCode = BInt Integer                       -- ^ An integer
@@ -200,11 +201,13 @@ getCharG = fromW8 <$> getWord8
 -- BCode helper functions
 
 -- | Return the hash of the info-dict in a torrent file
-hashInfoDict :: BCode -> Maybe L.ByteString
+hashInfoDict :: BCode -> IO Digest
 hashInfoDict bc =
-    do ih <- info bc
+    do ih <- case info bc of
+		Nothing -> fail "Could not find infoHash"
+		Just x  -> return x
        let encoded = encode ih
-       return . bytestringDigest . sha1 . L.fromChunks $ [encoded]
+       digest $ L.fromChunks $ [encoded]
 
 
 toPS :: String -> Path
@@ -270,8 +273,15 @@ infoPieceLength bc = do BInt i <- search [toPS "info", toPS "piece length"] bc
                         return i
 
 infoLength :: BCode -> Maybe Integer
-infoLength bc = do BInt i <- search [toPS "info", toPS "length"] bc
+infoLength bc = maybe length2 Just length1
+    where
+      -- |info/length key for single-file torrent
+      length1 = do BInt i <- search [toPS "info", toPS "length"] bc
                    return i
+      -- |length summed from files of multi-file torrent
+      length2 = sum `fmap`
+                map snd `fmap`
+                infoFiles bc
 
 infoPieces :: BCode -> Maybe [B.ByteString]
 infoPieces b = do t <- searchInfo "pieces" b
@@ -284,6 +294,28 @@ infoPieces b = do t <- searchInfo "pieces" b
 
 numberPieces :: BCode -> Maybe Int
 numberPieces = fmap length . infoPieces
+
+infoFiles :: BCode -> Maybe [([String], Integer)]  -- ^[(filePath, fileLength)]
+infoFiles bc = let mbFpath = fromBS `fmap` infoName bc
+                   mbLength = infoLength bc
+                   mbFiles = do BArray fileList <- searchInfo "files" bc
+                                return $ do fileDict@(BDict _) <- fileList
+                                            let Just (BInt length) = search [toPS "length"] fileDict
+                                                Just (BArray path) = search [toPS "path"] fileDict
+                                                path' = map (\(BString s) -> fromBS s) path
+                                            return (path', length)
+               in case (mbFpath, mbLength, mbFiles) of
+                    (Just fpath, _, Just files) ->
+                        Just $
+                        map (\(path, length) ->
+                                 (fpath:path, length)
+                            ) files
+                    (Just fpath, Just length, _) ->
+                        Just [([fpath], length)]
+                    (_, _, Just files) ->
+                        Just files
+                    _ ->
+                        Nothing
 
 pp :: BCode -> Doc
 pp bc =
