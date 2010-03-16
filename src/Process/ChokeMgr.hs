@@ -1,4 +1,5 @@
-module ChokeMgrP (
+{-# LANGUAGE FlexibleContexts #-}
+module Process.ChokeMgr (
     -- * Types, Channels
       ChokeMgrChannel
     , ChokeMgrMsg(..)
@@ -10,14 +11,12 @@ where
 import Data.Time.Clock
 import Data.List
 import qualified Data.Map as M
-import Data.Maybe
-import Data.Ord
 import qualified Data.Set as S
 import Data.Traversable as T
 
 import Control.Concurrent
-import Control.Concurrent.CML
-import Control.Exception
+import Control.Concurrent.CML.Strict
+import Control.DeepSeq
 import Control.Monad.Reader
 import Control.Monad.State
 
@@ -26,74 +25,74 @@ import Prelude hiding (catch, log)
 
 import System.Random
 
-import PeerP
 import PeerTypes
-import PieceMgrP hiding (start)
+import Process.PieceMgr hiding (start)
 import Process
-import Logging
-import FSP hiding (start)
 import Supervisor
 import Torrent hiding (infoHash)
-import TimerP
+import Process.Timer as Timer
 
 -- DATA STRUCTURES
 ----------------------------------------------------------------------
 
 data ChokeMgrMsg = Tick
-		 | RemovePeer PeerPid
-		 | AddPeer PeerPid PeerChannel
+                 | RemovePeer PeerPid
+                 | AddPeer PeerPid PeerChannel
+
+instance NFData ChokeMgrMsg where
+  rnf a = a `seq` ()
+
 type ChokeMgrChannel = Channel ChokeMgrMsg
 
-data CF = CF { logCh :: LogChannel
-	     , mgrCh :: ChokeMgrChannel
-	     , infoCh :: ChokeInfoChannel
-	     }
+data CF = CF { mgrCh :: ChokeMgrChannel
+             , infoCh :: ChokeInfoChannel
+             }
 
 instance Logging CF where
-  getLogger cf = ("ChokeMgrP", logCh cf)
+  logName _ = "Process.ChokeMgr"
 
 type ChokeMgrProcess a = Process CF PeerDB a
 
 -- INTERFACE
 ----------------------------------------------------------------------
 
-start :: LogChannel -> ChokeMgrChannel -> ChokeInfoChannel -> Int -> Bool -> SupervisorChan
+start :: ChokeMgrChannel -> ChokeInfoChannel -> Int -> Bool -> SupervisorChan
       -> IO ThreadId
-start logC ch infoC ur weSeed supC = do
-    TimerP.register 10 Tick ch
-    spawnP (CF logC ch infoC) (initPeerDB $ calcUploadSlots ur Nothing)
-	    (catchP (forever pgm)
-	      (defaultStopHandler supC))
+start ch infoC ur weSeed supC = do
+    Timer.register 10 Tick ch
+    spawnP (CF ch infoC) (initPeerDB $ calcUploadSlots ur Nothing)
+            (catchP (forever pgm)
+              (defaultStopHandler supC))
   where
     initPeerDB slots = PeerDB 2 weSeed slots M.empty []
-    pgm = do chooseP [mgrEvent, infoEvent] >>= syncP
+    pgm = {-# SCC "ChokeMgr" #-} do chooseP [mgrEvent, infoEvent] >>= syncP
     mgrEvent =
           recvWrapPC mgrCh
-	    (\msg -> case msg of
-			Tick          -> tick
-			RemovePeer t  -> removePeer t
-			AddPeer t pCh -> do
-			    logDebug $ "Adding peer " ++ show t
-			    weSeed <- gets seeding
-			    addPeer pCh weSeed t)
+            (\msg -> case msg of
+                        Tick          -> tick
+                        RemovePeer t  -> removePeer t
+                        AddPeer t pCh -> do
+                            debugP $ "Adding peer " ++ show t
+                            weSeed <- gets seeding
+                            addPeer pCh weSeed t)
     infoEvent =
-	  recvWrapPC infoCh
-	    (\m -> case m of
-		    BlockComplete pn blk -> informBlockComplete pn blk
-		    PieceDone pn -> informDone pn
-		    TorrentComplete -> do
-			modify (\s -> s { seeding = True
-					, peerMap =
-					   M.map (\pi -> pi { pAreSeeding = True })
-					         $ peerMap s}))
-    tick = do logDebug "Ticked"
-	      ch <- asks mgrCh
-	      TimerP.register 10 Tick ch
-	      updateDB
-	      runRechokeRound
-    removePeer tid = do logDebug $ "Removing peer " ++ show tid
-			modify (\db -> db { peerMap = M.delete tid (peerMap db),
-					    peerChain = (peerChain db) \\ [tid] })
+          recvWrapPC infoCh
+            (\m -> case m of
+                    BlockComplete pn blk -> informBlockComplete pn blk
+                    PieceDone pn -> informDone pn
+                    TorrentComplete -> do
+                        modify (\s -> s { seeding = True
+                                        , peerMap =
+                                           M.map (\pi -> pi { pAreSeeding = True })
+                                                 $ peerMap s}))
+    tick = do debugP "Ticked"
+              ch <- asks mgrCh
+              Timer.register 10 Tick ch
+              updateDB
+              runRechokeRound
+    removePeer tid = do debugP $ "Removing peer " ++ show tid
+                        modify (\db -> db { peerMap = M.delete tid (peerMap db),
+                                            peerChain = (peerChain db) \\ [tid] })
 
 -- INTERNAL FUNCTIONS
 ----------------------------------------------------------------------
@@ -106,9 +105,9 @@ type PeerPid = ThreadId -- For now, should probably change
 --   far we are in the process of wandering the optimistic unchoke chain.
 data PeerDB = PeerDB
     { chokeRound :: Int       -- ^ Counted down by one from 2. If 0 then we should
-			      --   advance the peer chain.
+                              --   advance the peer chain.
     , seeding :: Bool         -- ^ True if we are seeding the torrent.
-			      --   In a multi-torrent world, this has to change.
+                              --   In a multi-torrent world, this has to change.
     , uploadSlots :: Int      -- ^ Current number of upload slots
     , peerMap :: PeerMap      -- ^ Map of peers
     , peerChain ::  [PeerPid] -- ^ The order in which peers are optimistically unchoked
@@ -134,9 +133,9 @@ type RechokeData = (PeerPid, PeerInfo)
 compareInv :: Ord a => a -> a -> Ordering
 compareInv x y =
     case compare x y of
-	LT -> GT
-	EQ -> EQ
-	GT -> LT
+        LT -> GT
+        EQ -> EQ
+        GT -> LT
 
 comparingWith :: Ord a => (a -> a -> Ordering) -> (b -> a) -> b -> b -> Ordering
 comparingWith comp project x y =
@@ -164,8 +163,8 @@ advancePeerChain = do
     return $ map fst $ back ++ front
   where
     lookupPeer mp peer = case M.lookup peer mp of
-			    Nothing -> fail "Could not look up peer in map"
-			    Just p -> return (peer, p)
+                            Nothing -> fail "Could not look up peer in map"
+                            Just p -> return (peer, p)
 
 -- | Add a peer to the Peer Database
 addPeer :: PeerChannel -> Bool -> PeerPid -> ChokeMgrProcess ()
@@ -174,13 +173,13 @@ addPeer pCh weSeeding tid = do
     modify (\db -> db { peerMap = M.insert tid initialPeerInfo (peerMap db)})
   where
     initialPeerInfo = PeerInfo { pChokingUs = True
-			       , pDownRate = 0.0
-			       , pUpRate   = 0.0
-			       , pChannel = pCh
-			       , pInterestedInUs = False
-			       , pAreSeeding = weSeeding
-			       , pIsASeeder = False -- May get updated quickly
-			       }
+                               , pDownRate = 0.0
+                               , pUpRate   = 0.0
+                               , pChannel = pCh
+                               , pInterestedInUs = False
+                               , pAreSeeding = weSeeding
+                               , pIsASeeder = False -- May get updated quickly
+                               }
 
 -- | Insert a Peer randomly into the Peer chain. Threads the random number generator
 --   through.
@@ -242,29 +241,30 @@ assignUploadSlots slots downloaderPeers seederPeers =
 --   peers @s@. The value of @upSlots@ defines the number of upload slots available
 selectPeers :: Int -> [RechokeData] -> [RechokeData] -> ChokeMgrProcess (S.Set PeerPid)
 selectPeers uploadSlots downPeers seedPeers = do
-	let (nDownSlots, nSeedSlots) = assignUploadSlots uploadSlots downPeers seedPeers
-	    downPids = S.fromList $ map fst $ take nDownSlots $ sortLeech downPeers
-	    seedPids = S.fromList $ map fst $ take nSeedSlots $ sortSeeds seedPeers
-	logDebug $ "Slots: " ++ show nDownSlots ++ " downloads, " ++ show nSeedSlots ++ " seeders"
-	when (uploadSlots < nDownSlots + nSeedSlots)
-	    (fail "Wrong calculation of slots")
-	logDebug $ "Electing peers - leechers: " ++ show downPids ++ "; seeders: " ++ show seedPids
-	rm <- rateMap
-	logDebug $ "Peer rates: " ++ rm
-	return $ S.union downPids seedPids
+        let (nDownSlots, nSeedSlots) = assignUploadSlots uploadSlots downPeers seedPeers
+            downPids = S.fromList $ map fst $ take nDownSlots $ sortLeech downPeers
+            seedPids = S.fromList $ map fst $ take nSeedSlots $ sortSeeds seedPeers
+        debugP $ "Slots: " ++ show nDownSlots ++ " downloads, " ++ show nSeedSlots ++ " seeders"
+        when (uploadSlots < nDownSlots + nSeedSlots)
+            (fail "Wrong calculation of slots")
+        debugP $ "Electing peers - leechers: " ++ show downPids ++ "; seeders: " ++ show seedPids
+        rm <- rateMap
+        debugP $ "Peer rates: " ++ rm
+        return $ S.union downPids seedPids
     where
-	rateMap :: ChokeMgrProcess String
-	rateMap = do
-	    pm <- gets peerMap
-	    rts <- return $ map (\(pid, pi) ->
-		show pid ++ " Up: " ++ show (pUpRate pi) ++ " Down: " ++ show (pDownRate pi))
-		$ M.toList pm
-	    return $ show rts
+        rateMap :: ChokeMgrProcess String
+        rateMap = do
+            pm <- gets peerMap
+            rts <- return $ map (\(pid, pi) ->
+                show pid ++ " Up: " ++ show (pUpRate pi) ++ " Down: " ++ show (pDownRate pi))
+                $ M.toList pm
+            return $ show rts
 
 -- | Send a message to the peer process at PeerChannel. May raise
 --   exceptions if the peer is not running anymore.
-msgPeer :: PeerMessage -> PeerChannel -> ChokeMgrProcess ()
-msgPeer msg ch = syncP =<< sendP ch msg
+msgPeer :: PeerChannel -> PeerMessage -> ChokeMgrProcess ThreadId
+msgPeer ch msg = liftIO $ spawn proc
+  where proc = sync $ transmit ch msg
 
 -- | This function carries out the choking and unchoking of peers in a round.
 performChokingUnchoking :: S.Set PeerPid -> [RechokeData] -> ChokeMgrProcess ()
@@ -278,8 +278,8 @@ performChokingUnchoking elected peers =
     --   If we block on the sync, it means that the process in the other end must
     --   be dead. Thus we can just skip it. We will eventually receive this knowledge
     --   through another channel.
-    unchoke pi = ignoreProcessBlock () $ unchokePeer (pChannel pi)
-    choke   pi = ignoreProcessBlock () $ chokePeer (pChannel pi)
+    unchoke pi = unchokePeer (pChannel pi)
+    choke   pi = chokePeer (pChannel pi)
     -- If we have k optimistic slots, @optChoke k peers@ will unchoke the first @k@ interested
     --  in us. The rest will either be unchoked if they are not interested (ensuring fast start
     --    should they become interested); or they will be choked to avoid TCP/IP congestion.
@@ -291,8 +291,8 @@ performChokingUnchoking elected peers =
     optChoke k ((_, pi) : ps) = if pInterestedInUs pi
                                 then unchokePeer (pChannel pi) >> optChoke (k-1) ps
                                 else unchokePeer (pChannel pi) >> optChoke k ps
-    chokePeer = msgPeer ChokePeer
-    unchokePeer = msgPeer UnchokePeer
+    chokePeer = flip msgPeer ChokePeer
+    unchokePeer = flip msgPeer UnchokePeer
 
 -- | Function to split peers into those where we are seeding and those were we are leeching.
 --   also prunes the list for peers which are not interesting.
@@ -310,8 +310,8 @@ buildRechokeData = do
     pm    <- gets peerMap
     T.mapM (cPeer pm) chain
   where cPeer pm pid = case M.lookup pid pm of
-			    Nothing -> fail "buildRechokeData: Couldn't lookup pid"
-			    Just x -> return (pid, x)
+                            Nothing -> fail "buildRechokeData: Couldn't lookup pid"
+                            Just x -> return (pid, x)
 
 rechoke :: ChokeMgrProcess ()
 rechoke = do
@@ -322,19 +322,18 @@ rechoke = do
     performChokingUnchoking electedPeers peers
 
 -- | Traverse all peers and process them with a thunk.
+traversePeers :: (MonadState PeerDB m) => (PeerInfo -> m b) -> m (M.Map PeerPid b)
 traversePeers thnk = T.mapM thnk =<< gets peerMap
 
 informDone :: PieceNum -> ChokeMgrProcess ()
 informDone pn = traversePeers sendDone >> return ()
   where
-    sendDone pi = ignoreProcessBlock ()
-	    $ (sendP (pChannel pi) $ PieceCompleted pn) >>= syncP
+    sendDone pi = msgPeer (pChannel pi) (PieceCompleted pn)
 
 informBlockComplete :: PieceNum -> Block -> ChokeMgrProcess ()
 informBlockComplete pn blk = traversePeers sendComp >> return ()
   where
-    sendComp pi = ignoreProcessBlock ()
-	$ (sendP (pChannel pi) $ CancelBlock pn blk) >>= syncP
+    sendComp pi = msgPeer (pChannel pi) (CancelBlock pn blk)
 
 updateDB :: ChokeMgrProcess ()
 updateDB = do
@@ -342,22 +341,22 @@ updateDB = do
     modify (\db -> db { peerMap = nmp })
   where
       gatherRate pi = do
-	ch <- liftIO channel
-	t  <- liftIO getCurrentTime
-	ignoreProcessBlock pi (gather t ch pi)
+        ch <- liftIO channel
+        t  <- liftIO getCurrentTime
+        ignoreProcessBlock pi (gather t ch pi)
       gather t ch pi = do
-	(sendP (pChannel pi) $ PeerStats t ch) >>= syncP
-	(uprt, downrt, interested) <- recvP ch (const True) >>= syncP
-	return pi { pDownRate = downrt,
-		    pUpRate   = uprt,
-	            pInterestedInUs = interested } -- TODO: Seeder state
+        (sendP (pChannel pi) $ PeerStats t ch) >>= syncP
+        (uprt, downrt, interested) <- recvP ch (const True) >>= syncP
+        return pi { pDownRate = downrt,
+                    pUpRate   = uprt,
+                    pInterestedInUs = interested } -- TODO: Seeder state
 
 runRechokeRound :: ChokeMgrProcess ()
 runRechokeRound = do
     cRound <- gets chokeRound
     if (cRound == 0)
-	then do nChain <- advancePeerChain
-	        modify (\db -> db { chokeRound = 2,
-				    peerChain = nChain })
-	else modify (\db -> db { chokeRound = (chokeRound db) - 1 })
+        then do nChain <- advancePeerChain
+                modify (\db -> db { chokeRound = 2,
+                                    peerChain = nChain })
+        else modify (\db -> db { chokeRound = (chokeRound db) - 1 })
     rechoke

@@ -1,29 +1,3 @@
--- Haskell Torrent
--- Copyright (c) 2009, Jesper Louis Andersen,
--- All rights reserved.
---
--- Redistribution and use in source and binary forms, with or without
--- modification, are permitted provided that the following conditions are
--- met:
---
---  * Redistributions of source code must retain the above copyright
---    notice, this list of conditions and the following disclaimer.
---  * Redistributions in binary form must reproduce the above copyright
---    notice, this list of conditions and the following disclaimer in the
---    documentation and/or other materials provided with the distribution.
---
--- THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS
--- IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
--- THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
--- PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR
--- CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
--- EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
--- PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
--- PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
--- LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
--- NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
--- SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-
 -- | Filesystem routines. These are used for working with and
 --   manipulating files in the filesystem.
 module FS (PieceInfo(..),
@@ -39,18 +13,17 @@ module FS (PieceInfo(..),
            canSeed)
 where
 
-import Control.Monad
 import Control.Monad.State
 
 import qualified Data.ByteString.Char8 as B
 import qualified Data.ByteString.Lazy as L
 import qualified Data.Map as M
-import Data.Maybe
+
 import System.IO
 import System.Directory (createDirectoryIfMissing)
-import Data.List (intercalate)
+import System.FilePath (joinPath)
 
-import BCode
+import Protocol.BCode as BCode
 import qualified Digest as D
 import Torrent
 
@@ -104,6 +77,7 @@ pInfoLookup pn mp = case M.lookup pn mp of
 -- | FIXME: minor code duplication with @readBlock@
 readPiece :: PieceNum -> Handles -> PieceMap -> IO L.ByteString
 readPiece pn handles mp =
+    {-# SCC "readPiece" #-}
     do pInfo <- pInfoLookup pn mp
        bs <- L.concat `fmap`
              forM (projectHandles handles (offset pInfo) (len pInfo))
@@ -119,6 +93,7 @@ readPiece pn handles mp =
 --   expensive. Returning lazy ones may be more appropriate.
 readBlock :: PieceNum -> Block -> Handles -> PieceMap -> IO B.ByteString
 readBlock pn blk handles mp =
+    {-# SCC "readBlock" #-}
     do pInfo <- pInfoLookup pn mp
        B.concat `fmap`
         forM (projectHandles handles (offset pInfo + (fromIntegral $ blockOffset blk))
@@ -133,6 +108,7 @@ readBlock pn blk handles mp =
 --   block is of a wrong length, the call will fail.
 writeBlock :: Handles -> PieceNum -> Block -> PieceMap -> B.ByteString -> IO ()
 writeBlock handles n blk pm blkData =
+    {-# SCC "writeBlock" #-}
     do when lenFail $ fail "Writing block of wrong length"
        pInfo <- pInfoLookup n pm
        foldM_ (\blkData (h, offset, size) ->
@@ -151,7 +127,7 @@ writeBlock handles n blk pm blkData =
 -- | The @checkPiece h inf@ checks the file system for correctness of a given piece, namely if
 --   the piece described by @inf@ is correct inside the file pointed to by @h@.
 checkPiece :: PieceInfo -> Handles -> IO Bool
-checkPiece inf handles = do
+checkPiece inf handles = {-# SCC "checkPiece" #-} do
   bs <- L.concat `fmap`
         forM (projectHandles handles (offset inf) (fromInteger $ len inf))
                  (\(h, offset, size) ->
@@ -180,10 +156,10 @@ mkPieceMap bc = fetchData
   where fetchData = do pLen <- infoPieceLength bc
                        pieceData <- infoPieces bc
                        tLen <- infoLength bc
-		       let pm = M.fromList . zip [0..] . extract pLen tLen 0 $ pieceData
-		       when ( tLen /= (sum $ map len $ M.elems pm) )
-			    (error "PieceMap construction size assertion failed")
-		       return pm
+                       let pm = M.fromList . zip [0..] . extract pLen tLen 0 $ pieceData
+                       when ( tLen /= (sum $ map len $ M.elems pm) )
+                            (error "PieceMap construction size assertion failed")
+                       return pm
         extract :: Integer -> Integer -> Integer -> [B.ByteString] -> [PieceInfo]
         extract _    0     _    []       = []
         extract plen tlen offst (p : ps) | tlen < plen = PieceInfo { offset = offst,
@@ -219,9 +195,3 @@ openAndCheckFile bc =
        return (handles, have, pieceMap)
   where Just files = BCode.infoFiles bc
         Just pieceMap = mkPieceMap bc
-        joinPath = intercalate "/"
-
-
-
-
-

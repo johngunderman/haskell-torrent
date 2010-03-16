@@ -1,12 +1,21 @@
-.PHONY: build clean rebuild local-install haddock hlint etags ctags conf dist-rebuild conf-nodebug
+.PHONY: test build clean rebuild local-install haddock hlint tags conf dist-rebuild conf-nodebug conf-ts
 build:
 	runghc Setup.lhs build
 
 clean:
 	runghc Setup.lhs clean
 
+test: build
+	runghc Setup.lhs test
+
 conf:
-	runghc Setup.lhs configure --flags=debug --user
+	runghc Setup.lhs configure --flags="debug" --user --enable-library-profiling --enable-executable-profiling
+
+conf-threaded:
+	runghc Setup.lhs configure --flags="debug threaded" --user --enable-library-profiling --enable-executable-profiling
+
+conf-ts:
+	runghc Setup.lhs configure --flags="debug threadscope" --user
 
 conf-nodebug:
 	runghc Setup.lhs configure --user
@@ -22,11 +31,8 @@ haddock:
 	runghc Setup.lhs haddock --executables
 
 hlint:
-	hlint src/*.hs
+	hlint -r --cpp-define='__GLASGOW_HASKELL__=612' src
 
-etags:
-	hasktags --etags src/*.hs
-
-ctags:
-	hasktags --ctags src/*.hs
+tags:
+	hasktags --both $$(find src -type f -name '*.*hs')
 

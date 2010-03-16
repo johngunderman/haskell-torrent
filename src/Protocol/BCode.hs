@@ -1,33 +1,6 @@
--- Haskell Torrent
--- Copyright (c) 2009, Jesper Louis Andersen,
--- All rights reserved.
---
--- Redistribution and use in source and binary forms, with or without
--- modification, are permitted provided that the following conditions are
--- met:
---
---  * Redistributions of source code must retain the above copyright
---    notice, this list of conditions and the following disclaimer.
---  * Redistributions in binary form must reproduce the above copyright
---    notice, this list of conditions and the following disclaimer in the
---    documentation and/or other materials provided with the distribution.
---
--- THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS
--- IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
--- THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
--- PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR
--- CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
--- EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
--- PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
--- PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
--- LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
--- NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
--- SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-
-
 -- | Add a module description here
 --   also add descriptions to each function.
-module BCode 
+module Protocol.BCode 
 (
               BCode,
               Path(..),
@@ -56,8 +29,9 @@ module BCode
               trackerWarning,
               trackerError,
               toBS,
-              fromBS )
-
+              fromBS,
+              --Tests
+              testSuite)
 where
 
 import Control.Monad
@@ -65,10 +39,8 @@ import Control.Applicative hiding (many)
 import qualified Data.ByteString.Lazy as L
 import qualified Data.ByteString as B
 import Data.Char
-import Data.Word
-import Data.Int
+
 import Data.List
-import Data.Maybe
 import qualified Data.Map as M
 import Text.PrettyPrint.HughesPJ hiding (char)
 
@@ -76,7 +48,14 @@ import Data.Serialize
 import Data.Serialize.Put
 import Data.Serialize.Get
 
+import Test.QuickCheck
+import Test.Framework
+import Test.Framework.Providers.QuickCheck2
+import Test.Framework.Providers.HUnit
+import Test.HUnit hiding (Path, Test)
+
 import Digest
+import TestInstance() -- for instances only
 
 -- | BCode represents the structure of a bencoded file
 data BCode = BInt Integer                       -- ^ An integer
@@ -84,6 +63,19 @@ data BCode = BInt Integer                       -- ^ An integer
            | BArray [BCode]                     -- ^ An array
            | BDict (M.Map B.ByteString BCode)   -- ^ A key, value map
   deriving (Show, Eq)
+
+instance Arbitrary BCode where
+    arbitrary = sized bc'
+      where bc' :: Int -> Gen BCode
+            bc' 0 = oneof [BInt <$> arbitrary,
+                           BString <$> arbitrary]
+            bc' n | n > 0 =
+                oneof [BInt <$> arbitrary,
+                       BString <$> arbitrary,
+                       BArray <$> sequence (replicate n $ bc' (n `div` 8)),
+                       do keys <- vectorOf n arbitrary
+                          values <- sequence (replicate n $ bc' (n `div` 8))
+                          return $ BDict $ M.fromList $ zip keys values]
 
 data Path = PString B.ByteString
           | PInt Int
@@ -204,8 +196,8 @@ getCharG = fromW8 <$> getWord8
 hashInfoDict :: BCode -> IO Digest
 hashInfoDict bc =
     do ih <- case info bc of
-		Nothing -> fail "Could not find infoHash"
-		Just x  -> return x
+                Nothing -> fail "Could not find infoHash"
+                Just x  -> return x
        let encoded = encode ih
        digest $ L.fromChunks $ [encoded]
 
@@ -331,14 +323,36 @@ prettyPrint :: BCode -> String
 prettyPrint = render . pp
 
 
-testDecodeEncodeProp1 :: BCode -> Bool
-testDecodeEncodeProp1 m =
-    let encoded = encode m
-        decoded = decode encoded
-    in case decoded of
-         Left _ -> False
-         Right m' -> m == m'
+toBDict :: [(String,BCode)] -> BCode
+toBDict = BDict . M.fromList . map (\(k,v) -> ((toBS k),v))
 
+toBString :: String -> BCode
+toBString = BString . toBS
+
+
+-- TESTS
+
+
+testSuite :: Test
+testSuite = testGroup "Protocol/BCode"
+  [ testProperty "QC encode-decode/id" propEncodeDecodeId,
+    testCase "HUnit encode-decode/id" testDecodeEncodeProp1 ]
+
+propEncodeDecodeId :: BCode -> Bool
+propEncodeDecodeId bc =
+    let encoded = encode bc
+        decoded = decode encoded
+    in
+       Right bc == decoded
+
+testDecodeEncodeProp1 :: Assertion
+testDecodeEncodeProp1 =
+    let encoded = encode testData
+        decoded = decode encoded
+    in
+       assertEqual "for encode/decode identify" (Right testData) decoded
+
+testData :: [BCode]
 testData = [BInt 123,
             BInt (-123),
             BString (toBS "Hello"),
@@ -355,13 +369,4 @@ testData = [BInt 123,
                                            ])
                     ]
            ]
-
-toBDict :: [(String,BCode)] -> BCode
-toBDict = BDict . M.fromList . map (\(k,v) -> ((toBS k),v))
-
-toBString :: String -> BCode
-toBString = BString . toBS
-
-
-
 

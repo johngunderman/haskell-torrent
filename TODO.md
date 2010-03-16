@@ -26,74 +26,73 @@ wish-list.
    - (thomaschrstnsn) Implement a creator for torrent files
    - If we get a wrong URI, the code currently deadlocks since the tracker
      dies. Handle this problem gracefully.
-   - (axman) Cleanup the BCode module, while keeping the interface somewhat
-     stable. The code is an utter mess as it stands right now.
    - When we grab pieces from the Piece Manager, let it provide us with a
      pruned set of pieces we can ask with later. This way, we only need to
      consider pieces we already have once and we get a faster system.
-
      When doing this, only prune pieces which are done and checked.
-
-   - The StatusP process is always fed static data. Feed it the correct data
-     based on the current status: Are we a leecher or a seeder? And how much
-     data is there left to download before we have the full file?
-
-     (Hint: grep for canSeed and use the missingMap and pieceMap for the 'left'
-      data)
    - Send keepalives every two minutes as per the spec.
-   - Make git.md into a markdown document
    - For the histogram code, look at
      [Data.PSQueue](http://hackage.haskell.org/packages/archive/PSQueue/1.1/doc/html/Data-PSQueue.html). Ralf
       Hinze has a paper on that at [Hinze, R., A Simple Implementation
      Technique for Priority Search Queues, ICFP 2001, pp. 110-121](http://citeseer.ist.psu.edu/hinze01simple.html).
    - Consider letting the supervisors support monitoring of processes. Use this to reimplement parts
      of the PeerMgr code.
-   - Update the Seeder status in PeerMgrP.
-   - When stopping a Peer, put back the Pieces to the Piece Manager.
    - Do not send HAVE messages if the Peer already has the Piece Number.
    - Improve on the command line parser. We will certainly need full-fledged
      CL parsing at some point.
-   - When closing, gracefully tell the tracker about it.
-   - Let Piece Sets be S.Set PieceNum rather than [PieceNum]. They are
-     larger than 1000 for some large torrents, so it makes sense to shift to
-     a better representation.
-   - Cleanup the code around ChokeMgrP.advancePeerChain. It currently does a
-     lot of stuff it doesn't have to do.
    - The status reporting code needs some help. It only transfers up/down
      rates once every 30 seconds. If a peer is living for less than 30
      seconds, then no upload/download will be reported for that peer. The
      fix is to contact the StatusP when a peer closes if it has something to
      transfer.
-   - Make sure we actually seed when the torrent finishes.
-     Rather hard to check with the current construction in the PeerMgr. The
-     PeerMgr needs more work before this is possible.
+   - Use an mmap() based interface for file I/O.
+   - Eliminate use of nPieces in PeerP. It can be extracted from the 'pm'
+     value.
+   - Improve synchronization when the supervisor tree is closing down.
+     Currently the problem is that the supervisor tree will close down by
+     asynchronous messages, so the sync on stopping tree will not wait until
+     the subtree is done. This has another quite dangerous implication:
+     Stray indefinite blocks on mvars when closing down.
+     The fix is to build more structure into the closing of the supervisor
+     tree and make it properly synchronous.
+   - Play around with a more strict variant of CML. Don Stewart suggested to
+     look at some retainer profiling around the primitives.
+   - Cut down communication from the Receiver to the Peer Control process:
+     When the Receiver Process runs, it should try to drain its socket as
+     much as possible before trying to communicate with the peer. It should
+     also try to drain the socket again while waiting on the Control
+     process. Doing this will lower the contended point of communication in
+     the system.
+   - Add support for selecting what port to use for the listen. Also add
+     random port support.
+   - Investigate and use the Event Library of Bryan O'Sullivan and Johan
+     Tibbel:
 
-Known Bugs
-----------
+     [A Haskell event notification library - Github](http://github.com/tibbe/event)
 
-None known at the moment.
+Planned for the next release
+----------------------------
 
-Before releasing into the "wild"
---------------------------------
+   - Improve parallel execution. We are currently extremely synchronous.
+     Check the code with ThreadScope, some improvement has been done.
+   - Reduce CPU load and memory load. Alternative representations of various
+     data structures are needed.
+   - Add support for multiple torrents at once we need to at least hack in
+     these processes to make it possible:
+        Global Processes:
+            PeerMgr,
+            TorrentManager
 
-   - We currently take space proportional to torrent size due to our SHA1
-     calculation being slow and not use a file descriptor. Research into a
-     faster SHA1 library would be really beneficial.
-   - Check that the tracker is told about what happened.
-   - Introduce status update messages to the tracker. When the torrent is
-     started, stopped or completes, we should message the tracker with the
-     update right away. The tracker code already supports this, but the rest
-     of the code must do the right thing.
-   - What about reentrancy and FFI OpenSSL calls?
-   - Handle the following bug:
-            "The 'impossible' happened, are you implementing endgame?"
-     in PieceMgrP. We basically want to figure out what should happen.
+     We will have to check all the global processes to make sure they
+     understand the concept of having multiple torrents at their disposal.
+
 
 Items for later (no particular order)
 -------------------------------------
 
-   - Improve parallel execution. We are currently extremely synchronous.
-   - Add support for multiple torrents at once
+   - Improve the Peer Management code. Keep track of peers and process them
+     over time in an intelligent manner.
+   - Add restart-support to the supervisors where applicable.
    - Add prioritization support of multiTorrents
    - Implement a scraper on trackers
    - Implement extensions from http://www.bittorrent.org/beps/bep_0000.html
@@ -101,7 +100,7 @@ Items for later (no particular order)
    - Support the FAST extension
    - Add rate limitation support, locally or globally
    - Add support for DHT
-   - Support UDP tracking extension
+   - Support the UDP tracking extension
    - Support partial downloads (select files you want in the torrent)
    - Write an ETA estimator
    - Write the Users Guide.
@@ -110,8 +109,8 @@ Items for later (no particular order)
    - Azureus/Vuze has a keepalive flood detector built-in. Consider if this
      is relevant for this client.
    - Process monitoring in general. Think.
-   - We need to accept incoming connections. The system only connects
-     outward at the moment
    - Write a fuzzing framework for bittorrent.
+   - shapr wants this to be combinatorrent. Change to this name. It rocks
+     and people I've talked to really likes it.
 
 # vim: filetype=none tw=76 expandtab

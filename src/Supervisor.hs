@@ -20,31 +20,30 @@ where
 
 import Control.Applicative
 import Control.Concurrent
-import Control.Concurrent.CML
-import Control.Exception
-import Control.Monad
+import Control.Concurrent.CML.Strict
+import Control.DeepSeq
 import Control.Monad.State
 import Control.Monad.Reader
 
-import Data.List
-
 import Prelude hiding (catch)
 
-import Logging
 import Process
 
 data Child = Supervisor (SupervisorChan -> IO ThreadId)
            | Worker     (SupervisorChan -> IO ThreadId)
 
 data SupervisorMsg = IAmDying ThreadId
-		   | PleaseDie ThreadId
-		   | SpawnNew Child
+                   | PleaseDie ThreadId
+                   | SpawnNew Child
+
+instance NFData SupervisorMsg where
+    rnf a = a `seq` ()
 
 type SupervisorChan = Channel SupervisorMsg
 type Children = [Child]
 
 data ChildInfo = HSupervisor ThreadId
-	       | HWorker ThreadId
+               | HWorker ThreadId
 
 
 pDie :: SupervisorChan -> IO ()
@@ -57,62 +56,62 @@ class SupervisorConf a where
     getChan   :: a -> SupervisorChan
 
 data CFOFA = CFOFA { name :: String
-		   , chan :: SupervisorChan
-		   , parent :: SupervisorChan
-		   , logCh :: LogChannel }
+                   , chan :: SupervisorChan
+                   , parent :: SupervisorChan
+                   }
 
 instance SupervisorConf CFOFA where
     getParent = parent
     getChan   = chan
 
 instance Logging CFOFA where
-    getLogger cf = (name cf, logCh cf) -- TODO: Better naming!
+    logName = name
 
 data STOFA = STOFA { childInfo :: [ChildInfo] }
 
 -- | Run a set of processes and do it once in the sense that if someone dies,
 --   no restart is attempted. We will just kill off everybody without any kind
 --   of prejudice.
-allForOne :: String -> Children -> LogChannel -> SupervisorChan -> IO ThreadId
-allForOne name children logC parentC = do
+allForOne :: String -> Children -> SupervisorChan -> IO ThreadId
+allForOne name children parentC = do
     c <- channel
-    spawnP (CFOFA name c parentC logC) (STOFA []) (catchP startup
-							(defaultStopHandler parentC))
+    spawnP (CFOFA name c parentC) (STOFA []) (catchP startup
+                                                        (defaultStopHandler parentC))
   where
     startup = do
         childs <- mapM spawnChild children
-	modify (\_ -> STOFA childs)
-	forever eventLoop
+        modify (\_ -> STOFA (reverse childs))
+        forever eventLoop
     eventLoop = do
-	mTid <- liftIO myThreadId
-	syncP =<< chooseP [childEvent, parentEvent mTid]
+        mTid <- liftIO myThreadId
+        syncP =<< chooseP [childEvent, parentEvent mTid]
     childEvent = do
-	ev <- recvPC chan
-	wrapP ev (\msg -> case msg of
-	    IAmDying tid -> do gets childInfo >>= mapM_ finChild
-			       t <- liftIO myThreadId
-			       sendPC parent (IAmDying t) >>= syncP
-	    SpawnNew chld -> do n <- spawnChild chld
-			        modify (\(STOFA cs) -> STOFA (n : cs)))
-    parentEvent mTid = do
-	ev <- recvP parentC (\m -> case m of
-				    PleaseDie tid | tid == mTid -> True
-				    _                           -> False)
+        ev <- recvPC chan
         wrapP ev (\msg -> case msg of
-	    PleaseDie _ -> gets childInfo >>= mapM_ finChild
-	    _           -> return ())
+            IAmDying tid -> do gets childInfo >>= mapM_ finChild
+                               t <- liftIO myThreadId
+                               sendPC parent (IAmDying t) >>= syncP
+            SpawnNew chld -> do n <- spawnChild chld
+                                modify (\(STOFA cs) -> STOFA (n : cs)))
+    parentEvent mTid = do
+        ev <- recvP parentC (\m -> case m of
+                                    PleaseDie tid | tid == mTid -> True
+                                    _                           -> False)
+        wrapP ev (\msg -> case msg of
+            PleaseDie _ -> gets childInfo >>= mapM_ finChild
+            _           -> return ())
 
 data CFOFO = CFOFO { oName :: String
-		   , oChan :: SupervisorChan
-		   , oparent :: SupervisorChan
-		   , ologCh :: LogChannel }
+                   , oChan :: SupervisorChan
+                   , oparent :: SupervisorChan
+                   }
 
 instance SupervisorConf CFOFO where
     getParent = oparent
     getChan   = oChan
 
 instance Logging CFOFO where
-    getLogger cf = (oName cf, ologCh cf) -- TODO: Better naming!
+    logName = oName
 
 data STOFO = STOFO [ChildInfo]
 
@@ -124,38 +123,38 @@ data STOFO = STOFO [ChildInfo]
 --   the death and let the other processes keep running.
 --
 --   TODO: Restart policies.
-oneForOne :: String -> Children -> LogChannel -> SupervisorChan -> IO (ThreadId, SupervisorChan)
-oneForOne name children logC parentC = do
+oneForOne :: String -> Children -> SupervisorChan -> IO (ThreadId, SupervisorChan)
+oneForOne name children parentC = do
     c <- channel
-    t <- spawnP (CFOFO name c parentC logC) (STOFO []) (catchP startup
-						(defaultStopHandler parentC))
+    t <- spawnP (CFOFO name c parentC) (STOFO []) (catchP startup
+                                                (defaultStopHandler parentC))
     return (t, c)
   where
     startup :: Process CFOFO STOFO ()
     startup = do
-	childs <- mapM spawnChild children
-	modify (\_ -> STOFO childs)
-	forever eventLoop
+        childs <- mapM spawnChild children
+        modify (\_ -> STOFO (reverse childs))
+        forever eventLoop
     eventLoop :: Process CFOFO STOFO ()
     eventLoop = do
-	mTid <- liftIO myThreadId
-	syncP =<< chooseP [childEvent, parentEvent mTid]
+        mTid <- liftIO myThreadId
+        syncP =<< chooseP [childEvent, parentEvent mTid]
     childEvent = do
-	ev <- recvPC oChan
-	wrapP ev (\msg -> case msg of
-		    IAmDying tid -> pruneChild tid
-		    SpawnNew chld -> do n <- spawnChild chld
-					modify (\(STOFO cs) -> STOFO (n : cs)))
+        ev <- recvPC oChan
+        wrapP ev (\msg -> case msg of
+                    IAmDying tid -> pruneChild tid
+                    SpawnNew chld -> do n <- spawnChild chld
+                                        modify (\(STOFO cs) -> STOFO (n : cs)))
     parentEvent mTid = do
-	ev <- recvP parentC (\m -> case m of
-				     PleaseDie tid | tid == mTid -> True
-				     _                           -> False)
-	wrapP ev (\msg -> do (STOFO cs) <- get
-			     mapM_ finChild cs
-			     stopP)
+        ev <- recvP parentC (\m -> case m of
+                                     PleaseDie tid | tid == mTid -> True
+                                     _                           -> False)
+        wrapP ev (\msg -> do (STOFO cs) <- get
+                             mapM_ finChild cs
+                             stopP)
     pruneChild tid = modify (\(STOFO cs) -> STOFO (filter check cs))
-	  where check (HSupervisor t) = t == tid
-	        check (HWorker t)     = t == tid
+          where check (HSupervisor t) = t == tid
+                check (HWorker t)     = t == tid
 
 
 finChild :: SupervisorConf a => ChildInfo -> Process a b ()
